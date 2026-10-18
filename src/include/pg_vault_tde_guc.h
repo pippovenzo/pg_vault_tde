@@ -286,4 +286,6 @@ extern bool        pg_vault_tde_allow_plaintext_index;
 
 extern char*       pg_vault_tde_extension_name;
 
+extern bool        pg_vault_tde_dump_plaintext_warning;
+
 #endif /* PG_VAULT_TDE_GUC_H */

@@ -108,6 +108,10 @@ int   pg_vault_tde_pkcs11_slot_id     = -1;   /* used when token_label empty; -1
 char *pg_vault_tde_pkcs11_pin_env     = NULL; /* env var NAME holding the user PIN */
 char *pg_vault_tde_pkcs11_key_label   = NULL; /* CKA_LABEL of the KEK on the token */
 
+/* -----------------------------------------------------------------------
+ * v1.8 GUC definitions 
+ * ----------------------------------------------------------------------- */
+bool pg_vault_tde_dump_plaintext_warning  = NULL; /* COPY ... TO warning on or off */
 /*
  * allow_plaintext_index — opt-in relaxation of the encrypted_heap index AM
  * whitelist (v1.7). See tde_is_safe_index_am() below.
@@ -1093,6 +1097,54 @@ tde_process_utility_hook(PlannedStmt *pstmt,
 
         }
     }
+    else if(IsA(parsetree, CopyStmt)) 
+    {
+        CopyStmt *stmt = (CopyStmt*) parsetree;
+
+        if(!stmt->is_from && pg_vault_tde_dump_plaintext_warning)
+        {
+            if(stmt->relation != NULL) 
+            {
+                Oid rid = RangeVarGetRelid(stmt->relation, NoLock, true /* Missing ok */);
+                
+                if(OidIsValid(rid) && tde_rel_or_inheritors_use_encrypted_heap(rid))
+                {
+                    ereport(WARNING,
+                                (errmsg("pg_vault_tde: COPY TO on encrypted_heap table \"%s\" exports plaintext",
+                                        stmt->relation->relname),
+                                 errdetail("The table data is stored encrypted on disk, but COPY TO exports decrypted plaintext."),
+                                 errhint("Use pg_dump_tde for encrypted logical backups, "
+                                         "or set pg_vault_tde.dump_plaintext_warning = off to suppress this warning.")));
+                }
+            }
+            else if(stmt->query != NULL && IsA(stmt->query, SelectStmt)) 
+            {
+                SelectStmt *sel_stmt = (SelectStmt*) stmt->query;
+                ListCell   *lc; 
+
+                foreach(lc, sel_stmt->fromClause) 
+                {
+                    Node *node = (Node*) lfirst(lc);
+                    if(IsA(node, RangeVar))
+                    {
+                        RangeVar *rv = (RangeVar*) node;
+                        Oid      rid = RangeVarGetRelid(rv, NoLock, true /* Missing ok */);
+
+                        if(OidIsValid(rid) && tde_rel_or_inheritors_use_encrypted_heap(rid))
+                        {
+                            ereport(WARNING,
+                                        (errmsg("pg_vault_tde: COPY TO on encrypted_heap table \"%s\" exports plaintext",
+                                                rv->relname),
+                                        errdetail("The table data is stored encrypted on disk, but COPY TO exports decrypted plaintext."),
+                                        errhint("Use pg_dump_tde for encrypted logical backups, "
+                                                "or set pg_vault_tde.dump_plaintext_warning = off to suppress this warning.")));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
 
     /*
@@ -1941,6 +1993,15 @@ _PG_init(void)
         "(CKA_WRAP, CKA_UNWRAP, CKA_EXTRACTABLE=FALSE).",
         &pg_vault_tde_pkcs11_key_label, "pg_vault_tde_kek",
         PGC_SUSET, GUC_SUPERUSER_ONLY, NULL, tde_kms_config_assign_string, NULL);
+
+    DefineCustomBoolVariable("pg_vault_tde.dump_plaintext_warning",
+            "Warn when COPY TO exports unencrypted plaintext from encrypted_heap tables",
+            "When true (default), COPY ... TO ... on an encrypted_heap table "
+            "emits a WARNING reminding the caller that decrypted plaintext is "
+            "being exported. Set to false to suppress the warning.",
+            &pg_vault_tde_dump_plaintext_warning, true, PGC_SUSET,
+            0, NULL, NULL, NULL);
+
 
     /* Chain hooks so other extensions coexist correctly. */
     prev_shmem_request_hook = shmem_request_hook;
